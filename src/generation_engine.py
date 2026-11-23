@@ -8,6 +8,23 @@ import math
 import copy
 import random
 
+
+def _cache_layer(cache, idx):
+    """Return (key, value) for one layer across transformers cache APIs.
+
+    transformers 4.x exposes key_cache/value_cache, 5.x exposes layers[i].keys/.values,
+    and older versions return a tuple of (key, value) pairs. PassLLM unpacked
+    cache[layer_idx] directly, which raises TypeError on 5.x.
+    """
+    layers = getattr(cache, "layers", None)
+    if layers is not None:
+        layer = layers[idx]
+        return layer.keys, layer.values
+    key_cache = getattr(cache, "key_cache", None)
+    if key_cache is not None:
+        return key_cache[idx], cache.value_cache[idx]
+    return cache[idx]
+
 # Key: (vocab_size, device_str) -> Value: mask_tensor
 _MASK_CACHE = {}
 
@@ -185,7 +202,7 @@ def dynamic_beam_search(
                 expanded_cache = DynamicCache()
                 for layer_idx in range(len(shared_kv_cache)):
                     # shared_kv_cache[layer_idx] is a tuple (Key, Value)
-                    k, v = shared_kv_cache[layer_idx] 
+                    k, v = _cache_layer(shared_kv_cache, layer_idx)
                     
                     k_expanded = k.expand(current_batch_size, -1, -1, -1)
                     v_expanded = v.expand(current_batch_size, -1, -1, -1)
@@ -198,7 +215,7 @@ def dynamic_beam_search(
 
                 for layer_idx in range(num_layers):
                     # 1. Get Shared PII (Expand 1 -> Batch Size)
-                    k_shared, v_shared = shared_kv_cache[layer_idx]
+                    k_shared, v_shared = _cache_layer(shared_kv_cache, layer_idx)
                     k_pii = k_shared.expand(current_batch_size, -1, -1, -1)
                     v_pii = v_shared.expand(current_batch_size, -1, -1, -1)
 
@@ -260,7 +277,7 @@ def dynamic_beam_search(
                 # We assume the cache has L layers. We slice the batch_idx for each layer.
                 candidate_next_cache = []
                 for layer_idx in range(len(new_kv_cache)):
-                    k_layer, v_layer = new_kv_cache[layer_idx]
+                    k_layer, v_layer = _cache_layer(new_kv_cache, layer_idx)
                     
                     # Slice out ONLY this candidate's row (keep dim 0 as size 1)
                     # k_layer shape is (Batch, Heads, Seq, Dim). We want (1, Heads, Seq, Dim)
